@@ -1,0 +1,69 @@
+name: Weakened Test Check for AI Agents
+description: Flags PR test changes that weaken assertions, change expected values, disable tests or add waits. No account needed.
+author: sekharsdet
+branding:
+  icon: shield
+  color: orange
+
+inputs:
+  base:
+    description: Git ref to compare against. Default is the pull request's base branch.
+    required: false
+    default: ""
+  strict:
+    description: Fail the step when a change needs review (weakened assertion, changed expected value, disabled test).
+    required: false
+    default: "false"
+  comment:
+    description: Post and update one pull request comment with the review.
+    required: false
+    default: "true"
+  version:
+    description: turnsignal npm version or range to run. Pin an exact version to approve upgrades yourself.
+    required: false
+    default: "0.6"
+  github-token:
+    description: "Token for posting the comment (needs `pull-requests: write`)."
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    # No token in this step: installing packages is the classic supply-chain
+    # attack surface. The turnsignal bundle has no runtime dependencies, and
+    # --legacy-peer-deps keeps npm from pulling in its optional Playwright peer.
+    - name: Install
+      shell: bash
+      env:
+        TS_VERSION: ${{ inputs.version }}
+      run: |
+        mkdir -p "$RUNNER_TEMP/test-change-review"
+        npm install --prefix "$RUNNER_TEMP/test-change-review" --no-save --no-audit --no-fund --ignore-scripts --legacy-peer-deps --loglevel=error "turnsignal@$TS_VERSION"
+
+    - name: Review test changes
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        INPUT_BASE: ${{ inputs.base }}
+        INPUT_STRICT: ${{ inputs.strict }}
+        INPUT_COMMENT: ${{ inputs.comment }}
+      run: |
+        args=(governance)
+        if [ -n "$INPUT_BASE" ]; then args+=(--base "$INPUT_BASE"); fi
+        if [ "$INPUT_STRICT" = "true" ]; then args+=(--strict); fi
+        if [ "$INPUT_COMMENT" != "true" ]; then args+=(--no-comment); fi
+        # The log echoes test titles and code from the pull request: don't let
+        # them be read as workflow commands while the review runs.
+        stop_token="tcr-$(node -e 'process.stdout.write(require("crypto").randomBytes(16).toString("hex"))')"
+        echo "::stop-commands::$stop_token"
+        set +e
+        "$RUNNER_TEMP/test-change-review/node_modules/.bin/turnsignal" "${args[@]}"
+        code=$?
+        echo "::$stop_token::"
+        # Only --strict can fail the step; anything else (a shallow clone, no
+        # base branch) is reported in the log and passes.
+        if [ "$INPUT_STRICT" = "true" ] && [ "$code" -ne 0 ]; then
+          echo "::error title=Weakened Test Check::A test change needs review. See the pull request comment."
+          exit "$code"
+        fi
